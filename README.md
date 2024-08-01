@@ -3,6 +3,7 @@
  small wrapper script for ping that reports on connectivity outage periods and packet loss rates.
 
  Installtion Guide 
+ 
   Sudo chmod +x connectiontesting
   
   sudo ./connectiontesting
