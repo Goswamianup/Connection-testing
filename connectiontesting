@@ -1,0 +1,129 @@
+#!/bin/bash
+
+# Check for Bash version
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+    echo "This script requires Bash version 4 or higher"
+    exit 1
+fi
+
+# Default values
+interval=3
+threshold=4
+report_frequency=15
+debug=false
+domain=""
+
+# Function to display help
+show_help() {
+    echo "Usage: $0 [options] host"
+    echo
+    echo "Options:"
+    echo "  -i INTERVAL          Ping interval in seconds (default: 3s)"
+    echo "  -t THRESHOLD         Show warning when time elapsed since last packet exceeds this value (default: 4s)"
+    echo "  -f REPORT_FREQUENCY  Report frequency in minutes (default: 15m)"
+    echo "  -d DOMAIN            Domain to append to the host"
+    echo "  --help               Display this help message"
+    echo "  -debug               Enable debug logging"
+    exit 0
+}
+
+# Parse arguments
+while getopts ":i:t:f:d:-:" opt; do
+    case $opt in
+        i) interval=$OPTARG ;;
+        t) threshold=$OPTARG ;;
+        f) report_frequency=$OPTARG ;;
+        d) domain=$OPTARG ;;
+        -)
+            case $OPTARG in
+                help) show_help ;;
+                *) echo "Invalid option --$OPTARG" >&2; exit 1 ;;
+            esac
+            ;;
+        \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
+        :) echo "Option -$OPTARG requires an argument." >&2; exit 1 ;;
+    esac
+done
+shift $((OPTIND -1))
+
+if [ $# -ne 1 ]; then
+    show_help
+fi
+
+host=$1
+ping_command=$(command -v ping)
+
+if [ -z "$ping_command" ]; then
+    echo "Ping command not found"
+    exit 1
+fi
+
+if [ -n "$domain" ]; then
+    host="${host}.${domain}"
+fi
+
+# Function to log messages
+log() {
+    local level=$1
+    shift
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$level] $@"
+}
+
+# Function to start pinging
+start_ping() {
+    $ping_command $host -i $interval -c 1024 2>&1 &
+    ping_pid=$!
+}
+
+# Function to handle ping output
+process_ping_output() {
+    local line
+    while read -r line; do
+        if [[ $line == *"icmp_seq="* ]]; then
+            icmp_seq=$(echo "$line" | grep -oP 'icmp_seq=\K\d+')
+            if [ -n "$last_icmp_seq" ] && [ $((icmp_seq - last_icmp_seq)) -gt 1 ]; then
+                log "WARNING" "Possible lost packet(s): last icmp_seq=$last_icmp_seq, current icmp_seq=$icmp_seq"
+                lost_packets=$((lost_packets + icmp_seq - last_icmp_seq - 1))
+            fi
+            last_icmp_seq=$icmp_seq
+            if [[ $line == *"time="* ]]; then
+                last_timestamp=$(date +%s)
+            fi
+            total_packets=$((total_packets + 1))
+        fi
+    done
+}
+
+# Main loop
+main_loop() {
+    last_timestamp=0
+    last_icmp_seq=""
+    total_packets=0
+    lost_packets=0
+    report_last=$(date +%s)
+
+    start_ping
+    process_ping_output < <(tail -f --pid=$ping_pid /dev/null 2>/dev/null &)
+
+    while true; do
+        current_time=$(date +%s)
+        elapsed=$((current_time - last_timestamp))
+        if [ $elapsed -gt $threshold ]; then
+            log "WARNING" "$elapsed seconds elapsed since last successful ping"
+        fi
+
+        if [ $((current_time - report_last)) -gt $((report_frequency * 60)) ]; then
+            expected_packets=$((report_frequency * 60 / interval))
+            pct=$(awk "BEGIN {printf \"%.2f\", ($lost_packets / $expected_packets) * 100}")
+            log "INFO" "Packet loss (last $report_frequency mins): $pct%"
+            report_last=$(date +%s)
+            total_packets=0
+            lost_packets=0
+        fi
+
+        sleep 1
+    done
+}
+
+# Start the main loop
+main_loop
